@@ -17,16 +17,16 @@ galaxy.tools.parameters.basic module
     :undoc-members:
     :show-inheritance:
 
-galaxy.tools.parameters.dataset_matcher module
-----------------------------------------------
+galaxy.tools.parameters.dataset\_matcher module
+-----------------------------------------------
 
 .. automodule:: galaxy.tools.parameters.dataset_matcher
     :members:
     :undoc-members:
     :show-inheritance:
 
-galaxy.tools.parameters.dynamic_options module
-----------------------------------------------
+galaxy.tools.parameters.dynamic\_options module
+-----------------------------------------------
 
 .. automodule:: galaxy.tools.parameters.dynamic_options
     :members:
@@ -41,16 +41,16 @@ galaxy.tools.parameters.grouping module
     :undoc-members:
     :show-inheritance:
 
-galaxy.tools.parameters.history_query module
---------------------------------------------
+galaxy.tools.parameters.history\_query module
+---------------------------------------------
 
 .. automodule:: galaxy.tools.parameters.history_query
     :members:
     :undoc-members:
     :show-inheritance:
 
-galaxy.tools.parameters.input_translation module
-------------------------------------------------
+galaxy.tools.parameters.input\_translation module
+-------------------------------------------------
 
 .. automodule:: galaxy.tools.parameters.input_translation
     :members:
@@ -61,14 +61,6 @@ galaxy.tools.parameters.meta module
 -----------------------------------
 
 .. automodule:: galaxy.tools.parameters.meta
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-galaxy.tools.parameters.output_collect module
----------------------------------------------
-
-.. automodule:: galaxy.tools.parameters.output_collect
     :members:
     :undoc-members:
     :show-inheritance:
@@ -97,10 +89,12 @@ galaxy.tools.parameters.wrapped module
     :undoc-members:
     :show-inheritance:
 
-galaxy.tools.parameters.wrapped_json module
--------------------------------------------
+galaxy.tools.parameters.wrapped\_json module
+--------------------------------------------
 
 .. automodule:: galaxy.tools.parameters.wrapped_json
     :members:
     :undoc-members:
     :show-inheritance:
+
+
