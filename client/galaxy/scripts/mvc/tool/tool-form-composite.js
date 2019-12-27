@@ -14,6 +14,7 @@ import ToolFormBase from "mvc/tool/tool-form-base";
 import Modal from "mvc/ui/ui-modal";
 import Webhooks from "mvc/webhooks";
 import WorkflowIcons from "mvc/workflow/workflow-icons";
+import { mountWorkflowInvocationState } from "components/WorkflowInvocationState";
 
 var View = Backbone.View.extend({
     initialize: function(options) {
@@ -597,6 +598,9 @@ var View = Backbone.View.extend({
                 if (!input_def.step_linked) {
                     if (this._isDataStep(step)) {
                         validated = input_value && input_value.values && input_value.values.length > 0;
+                        if (!validated && input_def.optional) {
+                            validated = true;
+                        }
                     } else {
                         validated =
                             input_def.optional ||
@@ -628,7 +632,7 @@ var View = Backbone.View.extend({
                     Galaxy.emit.debug("tool-form-composite::submit", "Submission successful.", response);
                     self.$el.children().hide();
                     self.$el.append(self._templateSuccess(response));
-
+                    mountWorkflowInvocationState();
                     // Show Webhook if job is running
                     if ($.isArray(response) && response.length > 0) {
                         self.$el.append($("<div/>", { id: "webhook-view" }));
@@ -740,7 +744,8 @@ var View = Backbone.View.extend({
                     response[0].history_id
                 }">Switch to that history now</a>.`;
             }
-            return $(`
+            let success = `
+            <div>
                 <div class="donemessagelarge">
                     <p>
                         Successfully invoked workflow <b>${Utils.sanitize(this.model.get("name"))}</b>${timesExecuted}.
@@ -748,7 +753,12 @@ var View = Backbone.View.extend({
                     <p>
                         ${destinationBlurb}
                     </p>
-                </div>`);
+                </div>`;
+            for (const invocation of response) {
+                success += `<div class="workflow-invocation-state" workflow_invocation_id="${invocation.id}"></div>`;
+            }
+            success += "</div>";
+            return $(success);
         } else {
             return this._templateError(response, "Invalid success response. No invocations found.");
         }

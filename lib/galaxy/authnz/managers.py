@@ -1,6 +1,4 @@
-
 import copy
-import importlib
 import json
 import logging
 import os
@@ -14,9 +12,11 @@ from cloudauthz import CloudAuthz
 from cloudauthz.exceptions import (
     CloudAuthzBaseException
 )
+from six.moves import builtins
 
 from galaxy import exceptions
 from galaxy import model
+from galaxy.util import string_as_bool
 from galaxy.util import unicodify
 from .custos_authnz import CustosAuthnz
 from .psa_authnz import (
@@ -26,6 +26,7 @@ from .psa_authnz import (
     Storage,
     Strategy
 )
+
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +64,10 @@ class AuthnzManager(object):
                               " found these attributes: `{}`; skipping this node.".format(child.attrib))
                     continue
                 try:
-                    func = getattr(importlib.import_module('__builtin__'), child.get('Type'))
+                    if child.get('Type') == "bool":
+                        func = string_as_bool
+                    else:
+                        func = getattr(builtins, child.get('Type'))
                 except AttributeError:
                     log.error("The value of attribute `Type`, `{}`, is not a valid built-in type;"
                               " skipping this node").format(child.get('Type'))
@@ -250,8 +254,9 @@ class AuthnzManager(object):
             if success is False:
                 return False, message, (None, None)
             return True, message, backend.callback(state_token, authz_code, trans, login_redirect_url)
-        except Exception:
-            msg = 'An error occurred when handling callback from `{}` identity provider'.format(provider)
+        except Exception as e:
+            msg = 'The following error occurred when handling callback from `{}` identity provider: ' \
+                  '{}'.format(provider, e.message)
             log.exception(msg)
             return False, msg, (None, None)
 

@@ -77,6 +77,8 @@ class HistoriesController(BaseAPIController, ExportsHistoryMixin, ImportsHistory
                     controls which set of properties to return
             keys:   comma separated strings, unused by default
                     keys/names of individual properties to return
+            all:    boolean, defaults to 'false', admin-only
+                    returns all histories, not just current user's
 
         If neither keys or views are sent, the default view (set of keys) is returned.
         If both a view and keys are sent, the key list and the view's keys are
@@ -144,8 +146,16 @@ class HistoriesController(BaseAPIController, ExportsHistoryMixin, ImportsHistory
         filters = []
         # support the old default of not-returning/filtering-out deleted histories
         filters += self._get_deleted_filter(deleted, filter_params)
-        # users are limited to requesting only their own histories (here)
-        filters += [self.app.model.History.user == current_user]
+        # get optional parameter 'all'
+        all_histories = util.string_as_bool(kwd.get('all', False))
+        # if parameter 'all' is true, throw exception if not admin
+        # else add current user filter to query (default behaviour)
+        if all_histories:
+            if not trans.user_is_admin:
+                message = "Only admins can query all histories"
+                raise exceptions.AdminRequiredException(message)
+        else:
+            filters += [self.app.model.History.user == current_user]
         # and any sent in from the query string
         filters += self.filters.parse_filters(filter_params)
 
@@ -219,6 +229,9 @@ class HistoriesController(BaseAPIController, ExportsHistoryMixin, ImportsHistory
     @expose_api_anonymous
     def citations(self, trans, history_id, **kwd):
         """
+        GET /api/histories/{id}/citations
+        Return all the citations for the tools used to produce the datasets in
+        the history.
         """
         history = self.manager.get_accessible(self.decode_id(history_id), trans.user, current_history=trans.history)
         tool_ids = set([])
@@ -256,8 +269,7 @@ class HistoriesController(BaseAPIController, ExportsHistoryMixin, ImportsHistory
             rval.append(history_dict)
         return rval
 
-    # TODO: does this need to be anonymous_and_sessionless? Not just expose_api?
-    @expose_api_anonymous_and_sessionless
+    @expose_api
     def shared_with_me(self, trans, **kwd):
         """
         shared_with_me( self, trans, **kwd )
@@ -317,9 +329,6 @@ class HistoriesController(BaseAPIController, ExportsHistoryMixin, ImportsHistory
             if archive_source:
                 archive_type = payload.get("archive_type", "url")
             elif hasattr(archive_file, "file"):
-                # archive_file.file is a TemporaryFile and will be deleted once it is closed.
-                # We prevent this by setting `delete` to `False`.
-                archive_file.file.delete = False
                 archive_source = payload["archive_file"].file.name
                 archive_type = "file"
             else:
@@ -443,7 +452,7 @@ class HistoriesController(BaseAPIController, ExportsHistoryMixin, ImportsHistory
     @expose_api
     def archive_export(self, trans, id, **kwds):
         """
-        export_archive( self, trans, id, payload )
+        export_archive(self, trans, id, payload)
         * PUT /api/histories/{id}/exports:
             start job (if needed) to create history export for corresponding
             history.

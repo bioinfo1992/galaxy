@@ -19,7 +19,8 @@ from galaxy.managers.hdas import HDAManager
 from galaxy.managers.lddas import LDDAManager
 from galaxy.util import (
     defaultdict,
-    ExecutionTimer
+    ExecutionTimer,
+    listify,
 )
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,15 @@ class JobManager(object):
                     raise ItemAccessibilityException("You are not allowed to rerun this job.")
         trans.sa_session.refresh(job)
         return job
+
+    def stop(self, job, message=None):
+        if not job.finished:
+            job.mark_deleted(self.app.config.track_jobs_in_database)
+            self.app.model.context.current.flush()
+            self.app.job_manager.stop(job, message=message)
+            return True
+        else:
+            return False
 
 
 class JobSearch(object):
@@ -283,7 +293,9 @@ class JobSearch(object):
             # parameter as these are not passed along when expanding tool parameters
             # and they can differ without affecting the resulting dataset.
             for parameter in job.parameters:
-                if parameter.name in {'__workflow_invocation_uuid__', 'chromInfo', 'dbkey'} or parameter.name.endswith('|__identifier__'):
+                if parameter.name.startswith("__"):
+                    continue
+                if parameter.name in {'chromInfo', 'dbkey'} or parameter.name.endswith('|__identifier__'):
                     continue
                 n_parameters += 1
             if not n_parameters == len(param_dump):
@@ -294,28 +306,122 @@ class JobSearch(object):
         return None
 
 
-def fetch_job_states(app, sa_session, job_source_ids, job_source_types):
-    decode = app.security.decode_id
+def invocation_job_source_iter(sa_session, invocation_id):
+    # TODO: Handle subworkflows.
+    join = model.WorkflowInvocationStep.table.join(
+        model.WorkflowInvocation
+    )
+    statement = select(
+        [model.WorkflowInvocationStep.job_id, model.WorkflowInvocationStep.implicit_collection_jobs_id, model.WorkflowInvocationStep.state]
+    ).select_from(
+        join
+    ).where(
+        model.WorkflowInvocation.id == invocation_id
+    )
+    for row in sa_session.execute(statement):
+        if row[0]:
+            yield ('Job', row[0], row[2])
+        if row[1]:
+            yield ('ImplicitCollectionJobs', row[1], row[2])
+
+
+def fetch_job_states(sa_session, job_source_ids, job_source_types):
     assert len(job_source_ids) == len(job_source_types)
     job_ids = set()
     implicit_collection_job_ids = set()
+    workflow_invocations_job_sources = {}
+    workflow_invocation_states = {}  # should be set before we walk step states to be conservative on whether things are done expanding yet
 
     for job_source_id, job_source_type in zip(job_source_ids, job_source_types):
         if job_source_type == "Job":
             job_ids.add(job_source_id)
         elif job_source_type == "ImplicitCollectionJobs":
             implicit_collection_job_ids.add(job_source_id)
+        elif job_source_type == "WorkflowInvocation":
+            invocation_state = sa_session.query(model.WorkflowInvocation).get(job_source_id).state
+            workflow_invocation_states[job_source_id] = invocation_state
+            workflow_invocation_job_sources = []
+            for (invocation_step_source_type, invocation_step_source_id, invocation_step_state) in invocation_job_source_iter(sa_session, job_source_id):
+                workflow_invocation_job_sources.append((invocation_step_source_type, invocation_step_source_id, invocation_step_state))
+                if invocation_step_source_type == "Job":
+                    job_ids.add(invocation_step_source_id)
+                elif invocation_step_source_type == "ImplicitCollectionJobs":
+                    implicit_collection_job_ids.add(invocation_step_source_id)
+            workflow_invocations_job_sources[job_source_id] = workflow_invocation_job_sources
         else:
             raise RequestParameterInvalidException("Invalid job source type %s found." % job_source_type)
 
-    # TODO: use above sets and optimize queries on second pass.
+    job_summaries = {}
+    implicit_collection_jobs_summaries = {}
+
+    for job_id in job_ids:
+        job_summaries[job_id] = summarize_jobs_to_dict(sa_session, sa_session.query(model.Job).get(job_id))
+    for implicit_collection_jobs_id in implicit_collection_job_ids:
+        implicit_collection_jobs_summaries[implicit_collection_jobs_id] = summarize_jobs_to_dict(sa_session, sa_session.query(model.ImplicitCollectionJobs).get(implicit_collection_jobs_id))
+
     rval = []
     for job_source_id, job_source_type in zip(job_source_ids, job_source_types):
         if job_source_type == "Job":
-            rval.append(summarize_jobs_to_dict(sa_session, sa_session.query(model.Job).get(decode(job_source_id))))
+            rval.append(job_summaries[job_source_id])
+        elif job_source_type == "ImplicitCollectionJobs":
+            rval.append(implicit_collection_jobs_summaries[job_source_id])
         else:
-            rval.append(summarize_jobs_to_dict(sa_session, sa_session.query(model.ImplicitCollectionJobs).get(decode(job_source_id))))
+            invocation_state = workflow_invocation_states[job_source_id]
+            invocation_job_summaries = []
+            invocation_implicit_collection_job_summaries = []
+            invocation_step_states = []
+            for (invocation_step_source_type, invocation_step_source_id, invocation_step_state) in workflow_invocations_job_sources[job_source_id]:
+                invocation_step_states.append(invocation_step_state)
+                if invocation_step_source_type == "Job":
+                    invocation_job_summaries.append(job_summaries[invocation_step_source_id])
+                else:
+                    invocation_implicit_collection_job_summaries.append(implicit_collection_jobs_summaries[invocation_step_source_id])
+            rval.append(summarize_invocation_jobs(job_source_id, invocation_job_summaries, invocation_implicit_collection_job_summaries, invocation_state, invocation_step_states))
 
+    return rval
+
+
+def summarize_invocation_jobs(invocation_id, job_summaries, implicit_collection_job_summaries, invocation_state, invocation_step_states):
+    states = {}
+    if invocation_state == "scheduled":
+        all_scheduled = True
+        for invocation_step_state in invocation_step_states:
+            all_scheduled = all_scheduled and invocation_step_state == "scheduled"
+        if all_scheduled:
+            populated_state = "ok"
+        else:
+            populated_state = "new"
+    elif invocation_state in ["cancelled", "failed"]:
+        populated_state = "failed"
+    else:
+        # call new, ready => new
+        populated_state = "new"
+
+    def merge_states(component_states):
+        for key, value in component_states.items():
+            if key not in states:
+                states[key] = value
+            else:
+                states[key] += value
+
+    for job_summary in job_summaries:
+        merge_states(job_summary["states"])
+    for implicit_collection_job_summary in implicit_collection_job_summaries:
+        # 'new' (un-populated collections might not yet have a states entry)
+        if "states" in implicit_collection_job_summary:
+            merge_states(implicit_collection_job_summary["states"])
+        component_populated_state = implicit_collection_job_summary["populated_state"]
+        if component_populated_state == "failed":
+            populated_state = "failed"
+        elif component_populated_state == "new" and populated_state != "failed":
+            populated_state = "new"
+
+    rval = {
+        "id": invocation_id,
+        "model": "WorkflowInvocation",
+        "states": states,
+        "populated_state": populated_state,
+    }
     return rval
 
 
@@ -364,3 +470,119 @@ def summarize_jobs_to_dict(sa_session, jobs_source):
                 states[row[0]] = row[1]
             rval["states"] = states
     return rval
+
+
+def summarize_job_metrics(trans, job):
+    """Produce a dict-ified version of job metrics ready for tabular rendering.
+
+    Precondition: the caller has verified the job is accessible to the user
+    represented by the trans parameter.
+    """
+    if not trans.user_is_admin and not trans.app.config.expose_potentially_sensitive_job_metrics:
+        return []
+
+    def metric_to_dict(metric):
+        metric_name = metric.metric_name
+        metric_value = metric.metric_value
+        metric_plugin = metric.plugin
+        title, value = trans.app.job_metrics.format(metric_plugin, metric_name, metric_value)
+        return dict(
+            title=title,
+            value=value,
+            plugin=metric_plugin,
+            name=metric_name,
+            raw_value=str(metric_value),
+        )
+
+    metrics = [m for m in job.metrics if m.plugin != 'env' or trans.user_is_admin]
+    return list(map(metric_to_dict, metrics))
+
+
+def summarize_job_parameters(trans, job):
+    """Produce a dict-ified version of job parameters ready for tabular rendering.
+
+    Precondition: the caller has verified the job is accessible to the user
+    represented by the trans parameter.
+    """
+    def inputs_recursive(input_params, param_values, depth=1, upgrade_messages=None):
+        if upgrade_messages is None:
+            upgrade_messages = {}
+
+        rval = []
+
+        for input_index, input in enumerate(input_params.values()):
+            if input.name in param_values:
+                if input.type == "repeat":
+                    for i in range(len(param_values[input.name])):
+                        rval.extend(inputs_recursive(input.inputs, param_values[input.name][i], depth=depth + 1))
+                elif input.type == "section":
+                    # Get the value of the current Section parameter
+                    rval.append(dict(text=input.name, depth=depth))
+                    rval.extend(inputs_recursive(input.inputs, param_values[input.name], depth=depth + 1, upgrade_messages=upgrade_messages.get(input.name)))
+                elif input.type == "conditional":
+                    try:
+                        current_case = param_values[input.name]['__current_case__']
+                        is_valid = True
+                    except Exception:
+                        current_case = None
+                        is_valid = False
+                    if is_valid:
+                        rval.append(dict(text=input.test_param.label, depth=depth, value=input.cases[current_case].value))
+                        rval.extend(inputs_recursive(input.cases[current_case].inputs, param_values[input.name], depth=depth + 1, upgrade_messages=upgrade_messages.get(input.name)))
+                    else:
+                        rval.append(dict(text=input.name, depth=depth, notes="The previously used value is no longer valid.", error=True))
+                elif input.type == "upload_dataset":
+                    rval.append(dict(text=input.group_title(param_values), depth=depth, value="%s uploaded datasets" % len(param_values[input.name])))
+                elif input.type == "data":
+                    value = []
+                    for i, element in enumerate(listify(param_values[input.name])):
+                        if element.history_content_type == "dataset":
+                            hda = element
+                            encoded_id = trans.security.encode_id(hda.id)
+                            value.append({"src": "hda", "id": encoded_id, "hid": hda.hid, "name": hda.name})
+                        else:
+                            value.append({"hid": element.hid, "name": element.name})
+                    rval.append(dict(text=input.label, depth=depth, value=value))
+                elif input.visible:
+                    if hasattr(input, "label") and input.label:
+                        label = input.label
+                    else:
+                        # value for label not required, fallback to input name (same as tool panel)
+                        label = input.name
+                    rval.append(dict(text=label, depth=depth, value=input.value_to_display_text(param_values[input.name]), notes=upgrade_messages.get(input.name, '')))
+            else:
+                # Parameter does not have a stored value.
+                # Get parameter label.
+                if input.type == "conditional":
+                    label = input.test_param.label
+                elif input.type == "repeat":
+                    label = input.label()
+                else:
+                    label = input.label or input.name
+                rval.append(dict(text=label, depth=depth, notes="not used (parameter was added after this job was run)"))
+
+        return rval
+
+    # Load the tool
+    app = trans.app
+    toolbox = app.toolbox
+    tool = toolbox.get_tool(job.tool_id, job.tool_version)
+    assert tool is not None, 'Requested tool has not been loaded.'
+
+    params_objects = None
+    upgrade_messages = {}
+    has_parameter_errors = False
+
+    # Load parameter objects, if a parameter type has changed, it's possible for the value to no longer be valid
+    try:
+        params_objects = job.get_param_values(app, ignore_errors=False)
+    except Exception:
+        params_objects = job.get_param_values(app, ignore_errors=True)
+        # use different param_objects in the following line, since we want to display original values as much as possible
+        upgrade_messages = tool.check_and_update_param_values(job.get_param_values(app, ignore_errors=True),
+                                                              trans,
+                                                              update_values=False)
+        has_parameter_errors = True
+
+    parameters = inputs_recursive(tool.inputs, params_objects, depth=1, upgrade_messages=upgrade_messages)
+    return {"parameters": parameters, "has_parameter_errors": has_parameter_errors}

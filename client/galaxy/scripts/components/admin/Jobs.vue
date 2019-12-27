@@ -68,9 +68,6 @@
                                 </b-input-group-append>
                             </b-input-group>
                         </b-form-group>
-                        <b-button :pressed.sync="showCommandLine" variant="outline-secondary">
-                            {{ showCommandLine ? "Hide" : "Show" }} Command Line
-                        </b-button>
                     </b-col>
                     <b-col>
                         <b-card v-if="jobsItemsComputed.length" header="Stop Selected Jobs">
@@ -110,39 +107,32 @@
                 @row-clicked="showRowDetails"
                 :busy="busy"
             >
-                <template slot="table-caption">
+                <template v-slot:table-caption>
                     Unfinished Jobs: These jobs are unfinished and have had their state updated in the previous
                     {{ cutoffDisplay }} seconds.
                 </template>
-                <!-- Enable cell formatting for the command line column -->
-                <span slot="html" slot-scope="data" v-html="data.value" />
-                <template slot="HEAD_selected">
+                <template v-slot:head(selected)="{ rowSelected }">
                     <b-form-checkbox
                         v-model="allSelected"
                         :indeterminate="indeterminate"
                         @change="toggleAll"
                     ></b-form-checkbox>
                 </template>
-                <template slot="selected" slot-scope="data">
+                <template v-slot:cell(selected)="data">
                     <b-form-checkbox
                         v-model="selectedStopJobIds"
                         :checked="allSelected"
                         :key="data.index"
-                        :value="data.item['job_info']['id']"
+                        :value="data.item['id']"
                     ></b-form-checkbox>
                 </template>
-                <template slot="job_info" slot-scope="data">
-                    <b-link :href="data.value['info_url']" target="galaxy_main">
-                        {{ data.value["id"] }}
+                <template v-slot:cell(job_info)="data">
+                    <b-link :href="data.value.info_url" v-on:click.prevent="clickJobInfo(data.value.id)">
+                        {{ data.value.id }}
                     </b-link>
                 </template>
-                <template slot="row-details" slot-scope="row">
-                    <b-card>
-                        <h5>Command Line</h5>
-                        <pre
-                            class="text-white bg-dark"
-                        ><code class="break-word">{{ row.item.command_line }}</code></pre>
-                    </b-card>
+                <template v-slot:row-details="row">
+                    <job-details :commandLine="row.item.command_line" :jobId="row.item.jobId" />
                 </template>
             </b-table>
             <b-alert v-if="!recentJobsItemsComputed.length" variant="secondary" show>
@@ -160,34 +150,43 @@
                 @row-clicked="showRowDetails"
                 :busy="busy"
             >
-                <template slot="table-caption">
+                <template v-slot:table-caption>
                     Recent Jobs: These jobs have completed in the previous {{ cutoffDisplay }} seconds.
                 </template>
-                <!-- Enable cell formatting for the command line column -->
-                <span slot="html" slot-scope="data" v-html="data.value" />
-                <template slot="job_info" slot-scope="data">
-                    <b-link :href="data.value['info_url']" target="galaxy_main">
-                        {{ data.value["id"] }}
+                <template v-slot:cell(job_info)="data">
+                    <b-link :href="data.value.info_url" v-on:click.prevent="clickJobInfo(data.value.id)">
+                        {{ data.value.id }}
                     </b-link>
                 </template>
-                <template slot="row-details" slot-scope="row">
-                    <b-card>
-                        <h5>Command Line</h5>
-                        <pre
-                            class="text-white bg-dark"
-                        ><code class="break-word">{{ row.item.command_line }}</code></pre>
-                    </b-card>
+                <template v-slot:cell(update_time)="data">
+                    <utc-date :date="data.value" mode="elapsed" />
+                </template>
+                <template v-slot:row-details="row">
+                    <job-details :commandLine="row.item.command_line" :jobId="row.item.id" />
                 </template>
             </b-table>
+            <b-modal ref="job-info-modal" scrollable hide-header ok-only @hidden="resetModalContents">
+                <div class="info-frame-container">
+                    <iframe :src="selectedJobUrl"></iframe>
+                </div>
+            </b-modal>
         </div>
     </div>
 </template>
 
 <script>
 import { getAppRoot } from "onload/loadConfig";
+import UtcDate from "components/UtcDate";
 import axios from "axios";
+import JobDetails from "./JobDetails";
+
+function cancelJob(jobId, message) {
+    const url = `${getAppRoot()}api/jobs/${jobId}`;
+    return axios.delete(url, { data: { message: message } });
+}
 
 export default {
+    components: { UtcDate, JobDetails },
     data() {
         return {
             jobsItems: [],
@@ -198,16 +197,15 @@ export default {
                 { key: "user" },
                 { key: "tool_id", label: "Tool", tdClass: ["break-word"] },
                 { key: "state" },
-                { key: "input_dataset", label: "Inputs" },
                 { key: "job_runner_name", label: "Job Runner" },
                 { key: "job_runner_external_id", label: "PID/Cluster ID", sortable: true }
             ],
-            showCommandLine: false,
             cutoff: 180,
             cutoffDisplay: 180,
             jobLock: false,
             jobLockDisplay: false,
             selectedStopJobIds: [],
+            selectedJobId: null,
             allSelected: false,
             indeterminate: false,
             stopMessage: "",
@@ -220,15 +218,7 @@ export default {
     },
     watch: {
         jobLock(newVal) {
-            axios
-                .get(`${getAppRoot()}admin/jobs_control?job_lock=${this.jobLock}`)
-                .then(response => {
-                    this.jobLock = response.data.job_lock;
-                    this.jobLockDisplay = response.data.job_lock;
-                })
-                .catch(error => {
-                    console.error(error);
-                });
+            this.handleJobLock(axios.put(`${getAppRoot()}api/job_lock`, { active: this.jobLock }));
         },
         selectedStopJobIds(newVal) {
             if (newVal.length === 0) {
@@ -244,12 +234,23 @@ export default {
         }
     },
     methods: {
+        initJobLock() {
+            this.handleJobLock(axios.get(`${getAppRoot()}api/job_lock`));
+        },
+        handleJobLock(axiosPromise) {
+            axiosPromise
+                .then(response => {
+                    this.jobLock = response.data.active;
+                    this.jobLockDisplay = response.data.active;
+                })
+                .catch(error => {
+                    console.error(error);
+                });
+        },
         update() {
             this.busy = true;
             let params = [];
             params.push(`cutoff=${this.cutoff}`);
-            params.push(`stop_msg=${this.stopMessage}`);
-            params.push(`stop=${this.selectedStopJobIds.join()}`);
             params = params.join("&");
             axios
                 .get(`${getAppRoot()}admin/jobs_list?${params}`)
@@ -259,8 +260,6 @@ export default {
                     this.cutoffDisplay = response.data.cutoff;
                     this.message = response.data.message;
                     this.status = response.data.status;
-                    this.jobLock = response.data.job_lock;
-                    this.jobLockDisplay = response.data.job_lock;
                     this.loading = false;
                     this.busy = false;
                 })
@@ -274,9 +273,18 @@ export default {
             this.update();
         },
         onStopJobs() {
-            this.update();
-            this.selectedStopJobIds = [];
-            this.stopMessage = "";
+            axios.all(this.selectedStopJobIds.map(jobId => cancelJob(jobId, this.stopMessage))).then(res => {
+                this.update();
+                this.selectedStopJobIds = [];
+                this.stopMessage = "";
+            });
+        },
+        clickJobInfo(id) {
+            this.selectedJobId = id;
+            this.$refs["job-info-modal"].show();
+        },
+        resetModalContents() {
+            this.selectedJobId = null;
         },
         showRowDetails(row, index, e) {
             if (e.target.nodeName != "A") {
@@ -305,18 +313,10 @@ export default {
         },
         computeFields(fields) {
             const f = Array.from(fields).slice(0);
-            if (this.showCommandLine) {
-                f.splice(6, 0, {
-                    key: "command_line",
-                    tdClass: ["text-white", "bg-dark", "break-word"]
-                });
-            }
             return f;
         },
         toggleAll(checked) {
-            this.selectedStopJobIds = checked
-                ? this.jobsItemsModel.reduce((acc, j) => [...acc, j["job_info"]["id"]], [])
-                : [];
+            this.selectedStopJobIds = checked ? this.jobsItemsModel.reduce((acc, j) => [...acc, j["id"]], []) : [];
         },
         galaxyKwdToBootstrap(status) {
             let variant = "info";
@@ -353,9 +353,13 @@ export default {
             const f = this.jobsFields.slice(0);
             f.splice(2, 0, { key: "update_time", label: "Finished", sortable: true });
             return this.computeFields(f);
+        },
+        selectedJobUrl() {
+            return `${getAppRoot()}admin/job_info?jobid=${this.selectedJobId}`;
         }
     },
     created() {
+        this.initJobLock();
         this.update();
     }
 };
@@ -366,5 +370,18 @@ export default {
 .break-word {
     white-space: pre-wrap;
     word-break: break-word;
+}
+.info-frame-container {
+    overflow: hidden;
+    padding-top: 100%;
+    position: relative;
+}
+.info-frame-container iframe {
+    border: 0;
+    height: 100%;
+    left: 0;
+    position: absolute;
+    top: 0;
+    width: 100%;
 }
 </style>

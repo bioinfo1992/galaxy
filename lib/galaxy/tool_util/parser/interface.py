@@ -113,7 +113,7 @@ class ToolSource(object):
         return ["TMPDIR", "TMP", "TEMP"]
 
     def parse_docker_env_pass_through(self):
-        return ["GALAXY_SLOTS", "HOME"] + self.parse_tmp_directory_vars()
+        return ["GALAXY_SLOTS", "HOME", "_GALAXY_JOB_HOME_DIR", "_GALAXY_JOB_TMP_DIR"] + self.parse_tmp_directory_vars()
 
     @abstractmethod
     def parse_interpreter(self):
@@ -123,8 +123,8 @@ class ToolSource(object):
         """
 
     @abstractmethod
-    def parse_realtime(self):
-        """ Return RealTimeTool entry point templates to expose.
+    def parse_interactivetool(self):
+        """ Return InteractiveTool entry point templates to expose.
         """
 
     def parse_redirect_url_params_elem(self):
